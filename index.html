@@ -1,27 +1,4 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Galex · Generador de Códigos</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600;700&display=swap');
 
-:root{
-  /* Galex brand */
-  --techno:#001e6d;      /* navy primary */
-  --techno-2:#00164f;
-  --alien:#96ff00;       /* signature green */
-  --nova:#ffffff;
-  --cielo:#009cff;       /* sky blue */
-  --cometa:#ff8b10;      /* orange */
-  --circuito:#231dc5;    /* blue */
-
-  /* Derived dark surfaces */
-  --bg:#020c28;
-  --bg-2:#04123a;
-  --panel:#071a4d;
   --panel-2:#0a2158;
   --panel-3:#0e2a6b;
   --line:#123072;
@@ -854,6 +831,39 @@ function buildPrefix(tipo, clasNombre){
 const nextSeq = pfx => (CONSEC[pfx]||0)+1;
 function markUsed(pfx,seq){ if(!CONSEC[pfx]||seq>CONSEC[pfx]) CONSEC[pfx]=seq; }
 
+/* Cuántos códigos del lote usan ya este prefijo (para la vista previa) */
+function batchPrefixCount(pfx){
+  let n=0;
+  batch.forEach(it=>{
+    const b=buildPrefix(it.tipo,it.clas); if(b && b.prefix===pfx) n++;
+    if(it.mp){ const mb=buildPrefix('Materia_Prima',it.mp.clas); if(mb && mb.prefix===pfx) n++; }
+  });
+  return n;
+}
+/* Número que le tocaría al SIGUIENTE producto de ese prefijo */
+function previewSeq(pfx){ return (CONSEC[pfx]||0) + batchPrefixCount(pfx) + 1; }
+
+/* Re-numera TODO el lote de forma consecutiva por prefijo, sin huecos.
+   Se corre cada vez que el lote cambia (agregar, quitar, editar). */
+function reindexBatch(){
+  const used = {}; // prefijo -> cuántos van asignados en este lote
+  const take = pfx => { used[pfx]=(used[pfx]||0)+1; return (CONSEC[pfx]||0)+used[pfx]; };
+  batch.forEach(it=>{
+    const built = buildPrefix(it.tipo, it.clas);
+    if(built){
+      const seq = take(built.prefix);
+      it.codigo = built.prefix + String(seq).padStart(4,'0') + built.suffix;
+    }
+    if(it.mp){
+      const mpBuilt = buildPrefix('Materia_Prima', it.mp.clas);
+      if(mpBuilt){
+        const mpSeq = take(mpBuilt.prefix);
+        it.mp.codigo = mpBuilt.prefix + String(mpSeq).padStart(4,'0') + mpBuilt.suffix;
+      }
+    }
+  });
+}
+
 function getSubclas(tipo, clas, tickets){
   if(tipo==='Redencion'){
     const t = Number(tickets);
@@ -1005,7 +1015,7 @@ function updateCodePreview(){
   const codeEl = document.getElementById('cpi-code');
   const seqEl = document.getElementById('f-seq');
   if(!built){ codeEl.textContent='—'; seqEl.value=''; return; }
-  const seq = nextSeq(built.prefix);
+  const seq = previewSeq(built.prefix);
   seqEl.value = seq;
   renderCodePreview();
 
@@ -1041,7 +1051,7 @@ function updateCodePreview(){
     const mpClas = document.getElementById('f-mp-clas').value;
     const mpBuilt = buildPrefix('Materia_Prima', mpClas);
     if(mpBuilt){
-      document.getElementById('f-mp-code').value = mpBuilt.prefix + String(nextSeq(mpBuilt.prefix)).padStart(4,'0') + mpBuilt.suffix;
+      document.getElementById('f-mp-code').value = mpBuilt.prefix + String(previewSeq(mpBuilt.prefix)).padStart(4,'0') + mpBuilt.suffix;
       // auto-fill MP SAT and SUBCLAS (editable)
       const mpSat = getSatForClas('Materia_Prima', mpClas);
       const mpSatEl = document.getElementById('f-mp-sat');
@@ -1061,7 +1071,7 @@ function renderCodePreview(){
   const built = buildPrefix(selectedTipo, clas);
   const codeEl = document.getElementById('cpi-code');
   if(!built){ codeEl.textContent='—'; return; }
-  const seq = parseInt(document.getElementById('f-seq').value,10) || nextSeq(built.prefix);
+  const seq = parseInt(document.getElementById('f-seq').value,10) || previewSeq(built.prefix);
   const code = built.prefix + String(seq).padStart(4,'0') + built.suffix;
   codeEl.innerHTML = escHtml(built.prefix) + '<span class="muted">' + String(seq).padStart(4,'0') + '</span>' + (built.suffix?escHtml(built.suffix):'');
 }
@@ -1236,7 +1246,6 @@ function addProductToBatch(opts){
   if(!built) return {ok:false, err:'clas'};
   const seq = opts.seq || nextSeq(built.prefix);
   const codigo = built.prefix + String(seq).padStart(4,'0') + built.suffix;
-  markUsed(built.prefix, seq);
 
   // MP: either explicit (bulk paste) or from the form (single add)
   let mp = null;
@@ -1246,7 +1255,6 @@ function addProductToBatch(opts){
     if(mpBuilt){
       const mpSeq = nextSeq(mpBuilt.prefix);
       const mpCode = mpBuilt.prefix + String(mpSeq).padStart(4,'0') + mpBuilt.suffix;
-      markUsed(mpBuilt.prefix, mpSeq);
       mp = { codigo:mpCode, tipo:'Materia_Prima', clas:mpClas, nombre:opts.mpExplicit.nombre,
              subclas: getSubclas('Materia_Prima',mpClas),
              sat: getSatForClas('Materia_Prima',mpClas),
@@ -1259,7 +1267,6 @@ function addProductToBatch(opts){
     if(mpBuilt){
       const mpSeq = nextSeq(mpBuilt.prefix);
       const mpCode = mpBuilt.prefix + String(mpSeq).padStart(4,'0') + mpBuilt.suffix;
-      markUsed(mpBuilt.prefix, mpSeq);
       const mpSatVal = document.getElementById('f-mp-sat').value.trim();
       const mpSubVal = document.getElementById('f-mp-subclas').value.trim();
       if(mpSatVal && document.getElementById('f-mp-sat').dataset.auto === '0') saveSatOverride(mpBuilt.prefix, mpSatVal);
@@ -1439,6 +1446,7 @@ document.getElementById('paste-confirm').addEventListener('click', ()=>{
 
 /* ===================== CART ===================== */
 function renderCart(){
+  reindexBatch();
   const count = document.getElementById('cart-count');
   const empty = document.getElementById('cart-empty');
   const items = document.getElementById('cart-items');
@@ -1595,6 +1603,7 @@ document.getElementById('btn-generate').addEventListener('click', async ()=>{
 
   if(getGasUrl()) await refreshConsec();
 
+  reindexBatch();               // numera con los consecutivos frescos del servidor, sin huecos
   lastGenerated = batch.slice();
   lastGeneratedSaved = false;
   renderResult(countRecords());
@@ -2126,4 +2135,3 @@ init();
 </script>
 </body>
 </html>
-
