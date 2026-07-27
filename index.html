@@ -693,11 +693,16 @@ footer.foot .g{color:var(--alien);font-weight:700;}
     <div class="field" id="ce-tickets-wrap" style="display:none;"><label>Tickets</label><input type="number" id="ce-tickets" min="1"></div>
     <div id="ce-mp-block" style="display:none;border-top:1px solid var(--line);margin-top:6px;padding-top:14px;">
       <div style="font-family:var(--font-d);font-size:13px;color:var(--alien);margin-bottom:10px;">Materia Prima (unitario)</div>
-      <div class="field"><label>Nombre MP</label><input type="text" id="ce-mp-nombre"></div>
-      <div class="row2">
-        <div class="field"><label>Clasificación MP</label><select id="ce-mp-clas"></select></div>
-        <div class="field"><label>Código MP</label><input type="text" id="ce-mp-code" disabled style="font-family:var(--font-m);font-weight:700;"></div>
+      <div id="ce-mp-fields">
+        <div class="field"><label>Nombre MP</label><input type="text" id="ce-mp-nombre"></div>
+        <div class="row2">
+          <div class="field"><label>Clasificación MP</label><select id="ce-mp-clas"></select></div>
+          <div class="field"><label>Código MP</label><input type="text" id="ce-mp-code" disabled style="font-family:var(--font-m);font-weight:700;"></div>
+        </div>
       </div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer;font-size:13px;color:var(--cometa);">
+        <input type="checkbox" id="ce-mp-remove" style="width:auto;"> Quitar el código de Materia Prima de este premio
+      </label>
     </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="ce-cancel">Cancelar</button>
@@ -1491,6 +1496,8 @@ function openCartEdit(idx){
     document.getElementById('ce-mp-clas').value = it.mp.clas;
     document.getElementById('ce-mp-nombre').value = it.mp.nombre;
     document.getElementById('ce-mp-code').value = it.mp.codigo;
+    document.getElementById('ce-mp-remove').checked = false;
+    document.getElementById('ce-mp-fields').style.display = 'block';
   } else {
     mpBlock.style.display = 'none';
   }
@@ -1533,6 +1540,9 @@ document.getElementById('ce-tickets').addEventListener('input', ()=>{
     document.getElementById('ce-subclas').value = getSubclas('Redencion', document.getElementById('ce-clas').value, tickets) || '';
   }
 });
+document.getElementById('ce-mp-remove').addEventListener('change', function(){
+  document.getElementById('ce-mp-fields').style.display = this.checked ? 'none' : 'block';
+});
 document.getElementById('ce-cancel').addEventListener('click', ()=>document.getElementById('cart-edit-modal').classList.remove('show'));
 document.getElementById('cart-edit-modal').addEventListener('click', e=>{ if(e.target.id==='cart-edit-modal') document.getElementById('cart-edit-modal').classList.remove('show'); });
 document.getElementById('ce-save').addEventListener('click', ()=>{
@@ -1555,14 +1565,18 @@ document.getElementById('ce-save').addEventListener('click', ()=>{
   if(it.tipo==='Redencion') it.tickets = parseInt(document.getElementById('ce-tickets').value,10) || it.tickets;
   // MP updates
   if(it.mp){
-    const mpClas = document.getElementById('ce-mp-clas').value;
-    const mpBuilt = buildPrefix('Materia_Prima', mpClas);
-    it.mp.nombre = document.getElementById('ce-mp-nombre').value.trim() || it.mp.nombre;
-    if(mpBuilt && mpClas !== it.mp.clas){
-      it.mp.codigo = document.getElementById('ce-mp-code').value.trim() || it.mp.codigo;
-      it.mp.clas = mpClas;
-      it.mp.subclas = getSubclas('Materia_Prima', mpClas);
-      it.mp.sat = getSatForClas('Materia_Prima', mpClas);
+    if(document.getElementById('ce-mp-remove').checked){
+      it.mp = null;
+    } else {
+      const mpClas = document.getElementById('ce-mp-clas').value;
+      const mpBuilt = buildPrefix('Materia_Prima', mpClas);
+      it.mp.nombre = document.getElementById('ce-mp-nombre').value.trim() || it.mp.nombre;
+      if(mpBuilt && mpClas !== it.mp.clas){
+        it.mp.codigo = document.getElementById('ce-mp-code').value.trim() || it.mp.codigo;
+        it.mp.clas = mpClas;
+        it.mp.subclas = getSubclas('Materia_Prima', mpClas);
+        it.mp.sat = getSatForClas('Materia_Prima', mpClas);
+      }
     }
   }
   renderCart();
@@ -1642,6 +1656,7 @@ async function saveToCloud(){
   try{
     await gasPost({action:'save', records:buildAllRecords()});
     lastGeneratedSaved = true;
+    dbCache = null;   // la base cambió: forzar recarga la próxima vez que se abra/busque
     updateSaveState();
     toast('Guardado en Google Sheets','ok');
   }catch(e){
@@ -1735,7 +1750,7 @@ function contpaqRow(item, isN, cfg){
   const tipo = item.tipo;
   const abc = item.abc || cfg.abc || '';
   const pais = item.paisCode || cfg.pais || '';
-  return [item.codigo+(isN?'N':''), item.nombre, todayISO(), item.desc||'', TIPO_CONTPAQ[tipo]||'', item.sat||cfg.sat||'',
+  return [item.codigo+(isN?'N':''), item.nombre, todayDMY(), '', TIPO_CONTPAQ[tipo]||'', item.sat||cfg.sat||'',
     isN?1:9, cfg.unidad, '', '', '', '', TIPO_CONTPAQ[tipo]||'', item.subclas||'', cfg.dev, abc, pais, cfg.cont, isN?2:6];
 }
 document.getElementById('btn-dl-xlsx').addEventListener('click', ()=>{
@@ -1796,26 +1811,76 @@ document.querySelectorAll('.nav-btn').forEach(btn=>{
   });
 });
 
-/* ===================== DB ===================== */
-let dbSkip=0; const DB_PAGE=200; let dbTotal=0;
-async function loadDb(reset){
-  if(reset){ dbSkip=0; document.getElementById('db-tbody').innerHTML=''; }
-  const q = document.getElementById('db-q').value.trim();
+/* ===================== DB (caché local + búsqueda instantánea) ===================== */
+const DB_PAGE=200;
+let dbCache=null;      // todos los registros, se cargan 1 sola vez
+let dbFiltered=[];     // resultado del filtro actual
+let dbShown=0;         // cuántos se están mostrando en pantalla
+let dbLoadSeq=0;       // protege contra respuestas que llegan fuera de orden
+let dbSearchTimer=null;
+
+async function ensureDbCache(force){
+  if(dbCache && !force) return true;
+  if(!getGasUrl()){ dbCache=null; return false; }
+  const seq = ++dbLoadSeq;
+  const tb = document.getElementById('db-tbody');
+  tb.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--ink-faint);padding:34px;">Cargando base de datos…</td></tr>';
+  try{
+    const r = await gasGet({action:'records', skip:0, take:99999, tipo:'', q:''});
+    if(seq !== dbLoadSeq) return false;   // llegó una carga más nueva; ignoramos ésta
+    dbCache = r.records || [];
+    document.getElementById('stats-row').innerHTML = `<div class="stat-card"><div class="num">${dbCache.length.toLocaleString()}</div><div class="lbl">Registros en total</div></div>`;
+    return true;
+  }catch(e){
+    if(seq === dbLoadSeq){ tb.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--ink-faint);padding:34px;">Error al cargar: '+escHtml(e.message)+'</td></tr>'; }
+    return false;
+  }
+}
+
+function applyDbFilter(){
+  const q = document.getElementById('db-q').value.trim().toLowerCase();
   const tipo = document.getElementById('db-tipo').value;
+  const terms = q.split(/\s+/).filter(Boolean);
+  dbFiltered = (dbCache||[]).filter(r=>{
+    if(tipo && r.tipo !== tipo) return false;
+    if(!terms.length) return true;
+    const hay = ((r.codigo||'')+' '+(r.nombre||'')+' '+(r.maquina||'')+' '+(r.clasificacion||'')).toLowerCase();
+    return terms.every(t=> hay.includes(t));
+  });
+  renderDbPage(true);
+}
+
+function renderDbPage(reset){
+  const tb = document.getElementById('db-tbody');
+  if(reset){ tb.innerHTML=''; dbShown=0; }
+  if(!dbFiltered.length){
+    tb.innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--ink-faint);padding:34px;">Sin resultados.</td></tr>';
+    document.getElementById('db-loadmore').style.display='none';
+    return;
+  }
+  const slice = dbFiltered.slice(dbShown, dbShown+DB_PAGE);
+  renderDbRows(slice, false);   // siempre agregar (append)
+  dbShown += slice.length;
+  document.getElementById('db-loadmore').style.display = dbShown < dbFiltered.length ? 'block' : 'none';
+}
+
+async function loadDb(reset){
   if(!getGasUrl()){
     document.getElementById('db-tbody').innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--ink-faint);padding:34px;">Conecta Google Sheets en Ajustes para ver la base de datos compartida.</td></tr>';
     document.getElementById('stats-row').innerHTML='';
+    document.getElementById('db-loadmore').style.display='none';
     return;
   }
-  try{
-    const r = await gasGet({action:'records', skip:dbSkip, take:DB_PAGE, tipo, q});
-    dbTotal = r.total;
-    renderDbRows(r.records, reset);
-    dbSkip += r.records.length;
-    document.getElementById('db-loadmore').style.display = dbSkip<dbTotal?'block':'none';
-    if(reset) document.getElementById('stats-row').innerHTML = `<div class="stat-card"><div class="num">${r.total.toLocaleString()}</div><div class="lbl">Registros en total</div></div>`;
-  }catch(e){ toast('Error: '+e.message,'err'); }
+  const ok = await ensureDbCache(false);
+  if(ok) applyDbFilter();
 }
+
+// Fuerza recarga desde Google Sheets (tras guardar, editar o eliminar)
+async function refreshDb(){
+  const ok = await ensureDbCache(true);
+  if(ok) applyDbFilter();
+}
+
 function renderDbRows(records, reset){
   const tb = document.getElementById('db-tbody');
   if(reset) tb.innerHTML='';
@@ -1837,10 +1902,14 @@ function renderDbRows(records, reset){
     tb.appendChild(tr);
   });
 }
-document.getElementById('db-q').addEventListener('input', ()=>loadDb(true));
-document.getElementById('db-tipo').addEventListener('change', ()=>loadDb(true));
-document.getElementById('btn-db-refresh').addEventListener('click', async ()=>{ await refreshConsec(); loadDb(true); toast('Actualizado','ok'); });
-document.getElementById('btn-loadmore').addEventListener('click', ()=>loadDb(false));
+// Búsqueda local instantánea (pequeño retraso solo para no re-dibujar en cada tecla)
+document.getElementById('db-q').addEventListener('input', ()=>{
+  clearTimeout(dbSearchTimer);
+  dbSearchTimer = setTimeout(applyDbFilter, 150);
+});
+document.getElementById('db-tipo').addEventListener('change', applyDbFilter);
+document.getElementById('btn-db-refresh').addEventListener('click', async ()=>{ await refreshConsec(); await refreshDb(); toast('Actualizado','ok'); });
+document.getElementById('btn-loadmore').addEventListener('click', ()=>renderDbPage(false));
 
 document.getElementById('db-tbody').addEventListener('click', async e=>{
   const btn = e.target.closest('.icon-btn');
@@ -1848,7 +1917,7 @@ document.getElementById('db-tbody').addEventListener('click', async e=>{
   const codigo = btn.dataset.codigo;
   if(btn.dataset.act==='del'){
     if(!confirm(`¿Eliminar ${codigo}?`)) return;
-    try{ await gasPost({action:'delete', codigo}); toast('Eliminado','ok'); loadDb(true); }
+    try{ await gasPost({action:'delete', codigo}); toast('Eliminado','ok'); refreshDb(); }
     catch(e){ toast('Error: '+e.message,'err'); }
   }else{
     document.getElementById('em-codigo').value = codigo;
@@ -1868,7 +1937,7 @@ document.getElementById('em-save').addEventListener('click', async ()=>{
     maquina: document.getElementById('em-maquina').value.trim(),
     fecha: document.getElementById('em-fecha').value,
   };
-  try{ await gasPost({action:'update', record:r}); toast('Actualizado','ok'); document.getElementById('edit-modal').classList.remove('show'); loadDb(true); }
+  try{ await gasPost({action:'update', record:r}); toast('Actualizado','ok'); document.getElementById('edit-modal').classList.remove('show'); refreshDb(); }
   catch(e){ toast('Error: '+e.message,'err'); }
 });
 document.getElementById('edit-modal').addEventListener('click', e=>{ if(e.target.id==='edit-modal') document.getElementById('edit-modal').classList.remove('show'); });
@@ -1876,10 +1945,11 @@ document.getElementById('edit-modal').addEventListener('click', e=>{ if(e.target
 document.getElementById('btn-db-csv').addEventListener('click', async ()=>{
   if(!getGasUrl()){ toast('Conecta Google Sheets primero','err'); return; }
   try{
-    const r = await gasGet({action:'records', skip:0, take:99999, tipo:document.getElementById('db-tipo').value, q:document.getElementById('db-q').value.trim()});
+    if(!dbCache){ const ok = await ensureDbCache(false); if(!ok) return; applyDbFilter(); }
+    const data = dbFiltered.length || document.getElementById('db-q').value.trim() || document.getElementById('db-tipo').value ? dbFiltered : dbCache;
     const H = ['Codigo','Tipo','Clasificacion','Nombre','Descripcion','Maquina','Fecha'];
     const lines = [H.join(',')];
-    r.records.forEach(rec=> lines.push(H.map(h=>'"'+String(rec[h.toLowerCase()]||'').replace(/"/g,'""')+'"').join(',')));
+    data.forEach(rec=> lines.push(H.map(h=>'"'+String(rec[h.toLowerCase()]||'').replace(/"/g,'""')+'"').join(',')));
     const blob = new Blob(['\ufeff'+lines.join('\n')],{type:'text/csv;charset=utf-8;'});
     const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='codigos_galex.csv'; a.click();
   }catch(e){ toast('Error: '+e.message,'err'); }
@@ -1887,8 +1957,9 @@ document.getElementById('btn-db-csv').addEventListener('click', async ()=>{
 document.getElementById('btn-db-xlsx').addEventListener('click', async ()=>{
   if(!getGasUrl()){ toast('Conecta Google Sheets primero','err'); return; }
   try{
-    const r = await gasGet({action:'records', skip:0, take:99999, tipo:document.getElementById('db-tipo').value, q:document.getElementById('db-q').value.trim()});
-    const ws = XLSX.utils.json_to_sheet(r.records);
+    if(!dbCache){ const ok = await ensureDbCache(false); if(!ok) return; applyDbFilter(); }
+    const data = dbFiltered.length || document.getElementById('db-q').value.trim() || document.getElementById('db-tipo').value ? dbFiltered : dbCache;
+    const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Codigos');
     XLSX.writeFile(wb, 'codigos_galex.xlsx');
   }catch(e){ toast('Error: '+e.message,'err'); }
@@ -1898,7 +1969,7 @@ document.getElementById('btn-db-xlsx').addEventListener('click', async ()=>{
 document.getElementById('gas-url').value = getGasUrl();
 document.getElementById('btn-save-gas').addEventListener('click', ()=>{
   setGasUrl(document.getElementById('gas-url').value.trim());
-  pingGas().then(ok=>{ if(ok){ toast('Conectado','ok'); loadDb(true); refreshConsec().then(updateCodePreview); } else toast('No se pudo conectar','err'); });
+  pingGas().then(ok=>{ if(ok){ toast('Conectado','ok'); refreshDb(); refreshConsec().then(updateCodePreview); } else toast('No se pudo conectar','err'); });
 });
 document.getElementById('btn-test-gas').addEventListener('click', async ()=>{
   setGasUrl(document.getElementById('gas-url').value.trim());
@@ -2024,6 +2095,7 @@ document.getElementById('btn-add-pais').addEventListener('click', ()=>{
 function escHtml(s){ return String(s||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 function escAttr(s){ return escHtml(s); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
+function todayDMY(){ const d=new Date(); const p=n=>String(n).padStart(2,'0'); return p(d.getDate())+'/'+p(d.getMonth()+1)+'/'+d.getFullYear(); }
 let toastTimer;
 function toast(msg, kind){
   const t = document.getElementById('toast');
@@ -2054,3 +2126,4 @@ init();
 </script>
 </body>
 </html>
+
